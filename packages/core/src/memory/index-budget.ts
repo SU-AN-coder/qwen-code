@@ -12,28 +12,65 @@ export const INDEX_TRUNCATION_WARNING =
   '> WARNING: MEMORY.md is too large; only part of it was written. Keep index entries concise and move detail into topic files.';
 export const INDEX_TRUNCATION_NOTICE = `\n\n${INDEX_TRUNCATION_WARNING}`;
 
-export function trimIndexToBudget(lines: readonly string[]): string {
+export interface IndexBudgetSelection {
+  /** Indices, into the input, of the entries the budget keeps (input order). */
+  kept: readonly number[];
+  /** Indices, into the input, of the entries the budget drops (input order). */
+  dropped: readonly number[];
+}
+
+/**
+ * Decides which index entries survive the budget, and which are dropped.
+ *
+ * Both reasons for a drop are in play at once: an entry past
+ * {@link MAX_INDEX_LINES}, and an entry the character budget cannot fit.
+ * `MAX_INDEX_LINES * MAX_INDEX_LINE_CHARS` (200 × 150) exceeds
+ * {@link MAX_INDEX_CHARS}, so a store can blow the character budget with every
+ * line already legal — the caller needs the two causes told apart to give
+ * advice the reader can act on.
+ */
+export function selectIndexEntries(
+  lines: readonly string[],
+): IndexBudgetSelection {
   const entries = lines.slice(0, MAX_INDEX_LINES);
   const raw = entries.join('\n');
-  if (raw.length <= MAX_INDEX_CHARS) {
-    return raw;
-  }
-
-  // Reserve space for ordinary entries before long links, then restore order.
   const kept = new Set<number>();
-  let size = 0;
-  for (const limit of [MAX_INDEX_LINE_CHARS, MAX_INDEX_CHARS]) {
-    for (const [index, line] of entries.entries()) {
-      if (kept.has(index) || line.length > limit) {
-        continue;
-      }
-      const next = size + (kept.size > 0 ? 1 : 0) + line.length;
-      if (next > MAX_INDEX_CHARS) {
-        continue;
-      }
-      size = next;
+
+  if (raw.length <= MAX_INDEX_CHARS) {
+    for (let index = 0; index < entries.length; index++) {
       kept.add(index);
     }
+  } else {
+    // Reserve space for ordinary entries before long links, then restore order.
+    let size = 0;
+    for (const limit of [MAX_INDEX_LINE_CHARS, MAX_INDEX_CHARS]) {
+      for (const [index, line] of entries.entries()) {
+        if (kept.has(index) || line.length > limit) {
+          continue;
+        }
+        const next = size + (kept.size > 0 ? 1 : 0) + line.length;
+        if (next > MAX_INDEX_CHARS) {
+          continue;
+        }
+        size = next;
+        kept.add(index);
+      }
+    }
   }
-  return entries.filter((_, index) => kept.has(index)).join('\n');
+
+  const keptIndices: number[] = [];
+  const dropped: number[] = [];
+  for (let index = 0; index < lines.length; index++) {
+    if (kept.has(index)) {
+      keptIndices.push(index);
+    } else {
+      dropped.push(index);
+    }
+  }
+  return { kept: keptIndices, dropped };
+}
+
+export function trimIndexToBudget(lines: readonly string[]): string {
+  const { kept } = selectIndexEntries(lines);
+  return kept.map((index) => lines[index]).join('\n');
 }

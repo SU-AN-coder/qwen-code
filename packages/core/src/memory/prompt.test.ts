@@ -571,4 +571,81 @@ describe('managed auto-memory prompt helpers', () => {
     expect(result).not.toContain('</system-reminder> early');
     expect(result).toContain('<\\/system-reminder>');
   });
+
+  // A store of ~175 topic files assembles a catalog whose every line is legal
+  // but whose total exceeds the character budget. MAX_INDEX_LINES ×
+  // MAX_INDEX_LINE_CHARS (200 × 150) is 30,000, so the count — not any entry's
+  // length — is what blows the 25,000 budget here.
+  const legalLengthEntries = (count: number) =>
+    Array.from({ length: count }, (_, i) => {
+      const prefix = `- [Memory ${i}](memory-${i}.md) — `;
+      return `${prefix}${'h'.repeat(MAX_INDEX_LINE_CHARS - prefix.length)}`;
+    });
+
+  it('attributes an over-budget index to entry count when every line fits', () => {
+    const entries = legalLengthEntries(175);
+    const index = entries.join('\n');
+    expect(Math.max(...entries.map((line) => line.length))).toBe(
+      MAX_INDEX_LINE_CHARS,
+    );
+    expect(index.length).toBeGreaterThan(MAX_INDEX_CHARS);
+    expect(index.split('\n').length).toBeLessThanOrEqual(
+      MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
+    );
+
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      index,
+    );
+    const warning =
+      result.split('\n').find((line) => line.startsWith('> WARNING')) ?? '';
+
+    expect(warning).toContain(
+      `> WARNING: MEMORY.md is ${index.length} UTF-16 code units (limit: ${MAX_INDEX_CHARS}).`,
+    );
+    // The two previous halves of the message both named a lever that is
+    // already fully applied: no entry is over the line cap, so "entries are
+    // too long" is false and the per-line advice cannot lower the total.
+    expect(warning).not.toContain('index entries are too long');
+    expect(warning).not.toContain(
+      `one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units`,
+    );
+    expect(warning).toContain('The index holds too many entries');
+    expect(warning).toContain('merge or prune entries');
+  });
+
+  it('names the entries the budget dropped, not just "part of it"', () => {
+    const entries = legalLengthEntries(175);
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      entries.join('\n'),
+    );
+
+    expect(result).toContain(
+      'Dropped 10 of 175 index entries ("Memory 165", "Memory 166", "Memory 167", and 7 more) — those are not visible this session.',
+    );
+    // The named ones are the ones actually gone; the head is retained.
+    expect(result).not.toContain(entries[174]);
+    expect(result).toContain(entries[164]);
+  });
+
+  it('keeps the line-length advice when an entry is genuinely over the cap', () => {
+    const oversized = `- [Oversized](reference/${'%28'.repeat(9_000)}.md)`;
+    const retained = '- [Retained](reference/kept.md)';
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      `${oversized}\n${retained}`,
+    );
+    const warning =
+      result.split('\n').find((line) => line.startsWith('> WARNING')) ?? '';
+
+    expect(warning).toContain(
+      `1 entry is over the ${MAX_INDEX_LINE_CHARS}-code-unit line limit`,
+    );
+    expect(warning).toContain(
+      `one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units`,
+    );
+    expect(warning).not.toContain('The index holds too many entries');
+    expect(warning).toContain('Dropped 1 of 2 index entries ("Oversized")');
+  });
 });

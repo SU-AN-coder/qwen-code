@@ -12,7 +12,7 @@ import {
   MAX_INDEX_LINES as MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
   MAX_INDEX_CHARS,
   MAX_INDEX_LINE_CHARS,
-  trimIndexToBudget,
+  selectIndexEntries,
 } from './index-budget.js';
 
 const DIR_EXISTS_GUIDANCE =
@@ -161,6 +161,29 @@ export const TRUSTING_RECALL_SECTION: readonly string[] = [
   'A memory that summarizes repo state (activity logs, architecture snapshots) is frozen in time. If the user asks about *recent* or *current* state, prefer `git log` or reading the code over recalling the snapshot.',
 ];
 
+/** How many dropped entry names the warning prints before summarising the rest. */
+const MAX_REPORTED_DROPPED_ENTRIES = 3;
+
+/**
+ * Names what the budget dropped. The reader cannot otherwise tell which
+ * memories went invisible for this session, and keeps answering as if the
+ * catalog were complete.
+ */
+function describeDroppedEntries(
+  entries: readonly string[],
+  dropped: readonly number[],
+): string {
+  const names = dropped.slice(0, MAX_REPORTED_DROPPED_ENTRIES).map((index) => {
+    const title = /^\s*-\s*\[([^\]]*)\]/.exec(entries[index])?.[1]?.trim();
+    return title ? `"${title}"` : `entry ${index + 1}`;
+  });
+  const rest =
+    dropped.length > names.length
+      ? `, and ${dropped.length - names.length} more`
+      : '';
+  return ` Dropped ${dropped.length} of ${entries.length} index entries (${names.join(', ')}${rest}) — those are not visible this session.`;
+}
+
 function truncateManagedAutoMemoryIndex(indexContent: string): string {
   const trimmed = normalizeContent(indexContent).trim();
   const lines = trimmed.split('\n');
@@ -177,16 +200,34 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
   const entries = trimmed.endsWith(INDEX_TRUNCATION_NOTICE)
     ? trimmed.slice(0, -INDEX_TRUNCATION_NOTICE.length).split('\n')
     : lines;
-  const truncated = trimIndexToBudget(entries);
+  const { kept, dropped } = selectIndexEntries(entries);
+  const truncated = kept.map((index) => entries[index]).join('\n');
+
+  // Being over the character budget is not the same cause as an entry being
+  // over the line cap: MAX_INDEX_LINES × MAX_INDEX_LINE_CHARS (200 × 150)
+  // exceeds MAX_INDEX_CHARS, so a store can blow the character budget with
+  // every entry already legal. Printing the line-length advice there tells the
+  // reader to shorten lines they cannot shorten; the lever is the entry count.
+  const overlongLines = entries.filter(
+    (line) => line.length > MAX_INDEX_LINE_CHARS,
+  ).length;
 
   const reason =
-    wasCharTruncated && !wasLineTruncated
-      ? `${charCount} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — index entries are too long`
-      : wasLineTruncated && !wasCharTruncated
-        ? `${lineCount} lines (limit: ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES})`
+    wasLineTruncated && !wasCharTruncated
+      ? `${lineCount} lines (limit: ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES})`
+      : wasCharTruncated && !wasLineTruncated
+        ? `${charCount} UTF-16 code units (limit: ${MAX_INDEX_CHARS})`
         : `${lineCount} lines and ${charCount} UTF-16 code units`;
 
-  return `${truncated}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded. Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files.`;
+  const cause =
+    overlongLines > 0
+      ? `${overlongLines} ${overlongLines === 1 ? 'entry is' : 'entries are'} over the ${MAX_INDEX_LINE_CHARS}-code-unit line limit; keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units and move detail into topic files`
+      : `the index holds too many entries; merge or prune entries so the catalog fits, because shortening entries that already fit one line cannot lower the total`;
+
+  const droppedReport =
+    dropped.length > 0 ? describeDroppedEntries(entries, dropped) : '';
+
+  return `${truncated}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded.${droppedReport} ${cause[0].toUpperCase()}${cause.slice(1)}.`;
 }
 
 /**
